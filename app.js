@@ -178,12 +178,13 @@
     if(!g || g.giacenza <= 0) return;
     g.giacenza -= 1;
     var importo = g.prezzo;
-    state.operations.push({ id: uid(), data: todayISO(), tipo: "VENDITA", gioco: nome, quantita: 1, importo: importo, note: "" });
+    state.operations.push({ id: uid(), data: todayISO(), ora: nowOra(), ts: Date.now(), tipo: "VENDITA", gioco: nome, quantita: 1, importo: importo, note: "" });
     await saveGames();
     await saveOperations();
     renderTiles();
     renderRiepilogo();
     suonoVendita();
+    scheduleSbAutoSync();
     showToast("Venduta 1 " + nome + " · " + fmtEUR(importo) + " €");
   }
 
@@ -193,7 +194,7 @@
     g.giacenza -= 1;
     var valore = g.prezzo;
     state.operations.push({
-      id: uid(), data: todayISO(), tipo: "PAGAMENTO VINCITA", gioco: nome,
+      id: uid(), data: todayISO(), ora: nowOra(), ts: Date.now(), tipo: "PAGAMENTO VINCITA", gioco: nome,
       quantita: 0, importo: 0, importoVinto: valore,
       schede: [{ gioco: nome, quantita: 1, prezzo: g.prezzo }], note: ""
     });
@@ -202,6 +203,7 @@
     renderTiles();
     renderRiepilogo();
     suonoVincita();
+    scheduleSbAutoSync();
     showToast("Data 1 " + nome + " come vincita · " + fmtEUR(valore) + " €");
   }
 
@@ -210,35 +212,53 @@
     var importo = Number(input.value) || 0;
     if(importo <= 0){ showToast("Inserisci un importo valido"); return; }
     state.operations.push({
-      id: uid(), data: todayISO(), tipo: "PAGAMENTO VINCITA", gioco: "",
+      id: uid(), data: todayISO(), ora: nowOra(), ts: Date.now(), tipo: "PAGAMENTO VINCITA", gioco: "",
       quantita: 0, importo: importo, importoVinto: importo, schede: [], note: ""
     });
     await saveOperations();
     input.value = "";
     renderRiepilogo();
     suonoPagamento();
+    scheduleSbAutoSync();
     showToast("Pagati " + fmtEUR(importo) + " € in contanti");
   }
 
   // ---------- Chiusura giornaliera ----------
-  function summarizeDay(date){
+  var TURNI = ["mattina", "pomeriggio", "sera"];
+  var TURNO_LABEL = { mattina: "Mattina", pomeriggio: "Pomeriggio", sera: "Sera" };
+
+  function getTurno(ora){
+    if(!ora) return "mattina"; // operazioni vecchie senza orario registrato
+    var hh = Number(ora.slice(0,2));
+    if(hh < 13) return "mattina";
+    if(hh < 18) return "pomeriggio";
+    return "sera";
+  }
+
+  function summarizeShift(date, turno){
     var incassoVendite = 0, pezzi = 0, pagamenti = 0, riscatti = 0, numOperazioni = 0;
     state.operations.forEach(function(op){
-      if(op.data !== date) return;
+      if(op.data !== date || getTurno(op.ora) !== turno) return;
       numOperazioni++;
       if(op.tipo === "VENDITA"){ incassoVendite += Number(op.importo)||0; pezzi += Number(op.quantita)||0; }
       else if(op.tipo === "PAGAMENTO VINCITA"){ pagamenti += Number(op.importo)||0; }
       else if(op.tipo === "RISCATTO VINCITA"){ riscatti += Number(op.importo)||0; }
     });
     return {
-      data: date, incassoVendite: incassoVendite, pezzi: pezzi, pagamenti: pagamenti,
+      data: date, turno: turno, incassoVendite: incassoVendite, pezzi: pezzi, pagamenti: pagamenti,
       riscatti: riscatti, cassaNettaGiorno: incassoVendite - pagamenti + riscatti, numOperazioni: numOperazioni
     };
   }
 
+  function summarizeDayByShifts(date){
+    var out = {};
+    TURNI.forEach(function(t){ out[t] = summarizeShift(date, t); });
+    return out;
+  }
+
   async function chiudiGiornata(date){
     date = date || todayISO();
-    archivio[date] = summarizeDay(date);
+    archivio[date] = summarizeDayByShifts(date);
     await saveArchivio();
     return archivio[date];
   }
@@ -249,7 +269,7 @@
     var today = todayISO();
     var changed = false;
     Object.keys(dates).forEach(function(d){
-      if(d !== today && !archivio[d]){ archivio[d] = summarizeDay(d); changed = true; }
+      if(d !== today && !archivio[d]){ archivio[d] = summarizeDayByShifts(d); changed = true; }
     });
     if(changed) await saveArchivio();
   }
@@ -270,25 +290,38 @@
     }, msUntilNextMidnight());
   }
 
+  function startRegistroRefreshTimer(){
+    setInterval(function(){ renderOpsList(); }, 60 * 1000);
+  }
+
   function renderStorico(){
     var body = document.getElementById('storicoBody');
     if(!body) return;
     body.innerHTML = "";
     var today = todayISO();
+
+    var days = {};
+    Object.keys(archivio).forEach(function(d){ days[d] = archivio[d]; });
+    if(!days[today]) days[today] = Object.assign({ inCorso: true }, summarizeDayByShifts(today));
+
+    var dateKeys = Object.keys(days).sort(function(a,b){ return a < b ? 1 : -1; });
     var rows = [];
-    if(!archivio[today]){
-      rows.push(Object.assign({ inCorso: true }, summarizeDay(today)));
-    }
-    Object.keys(archivio).sort(function(a,b){ return a < b ? 1 : -1; }).forEach(function(d){
-      rows.push(archivio[d]);
+    dateKeys.forEach(function(d){
+      var dayData = days[d];
+      TURNI.forEach(function(t){
+        var r = dayData[t];
+        if(!r || r.numOperazioni === 0) return;
+        rows.push(Object.assign({ inCorso: dayData.inCorso }, r));
+      });
     });
+
     if(rows.length === 0){
-      body.innerHTML = "<tr><td colspan='6' style='color:var(--ink-soft);padding:10px 0;'>Nessuna giornata registrata ancora.</td></tr>";
+      body.innerHTML = "<tr><td colspan='5' style='color:var(--ink-soft);padding:10px 0;'>Nessun turno con operazioni ancora.</td></tr>";
       return;
     }
-    rows.slice(0, 31).forEach(function(r){
+    rows.slice(0, 60).forEach(function(r){
       var tr = document.createElement('tr');
-      var label = fmtDate(r.data) + (r.inCorso ? " (in corso)" : "");
+      var label = fmtDate(r.data) + " \u2013 " + TURNO_LABEL[r.turno] + (r.inCorso ? " (in corso)" : "");
       tr.innerHTML =
         "<td>" + label + "</td>" +
         "<td class='num-col'>" + r.pezzi + "</td>" +
@@ -411,6 +444,141 @@
     }
   }
 
+  // ---------- Sincronizzazione con Supabase ----------
+  var sbConfig = { url: "", key: "" };
+  var sbClient = null;
+
+  async function loadSbConfig(){
+    try{ var r = await window.storage.get('gv_sb_config', false); if(r && r.value) sbConfig = JSON.parse(r.value); }catch(e){}
+  }
+  async function saveSbConfig(){ try{ await window.storage.set('gv_sb_config', JSON.stringify(sbConfig), false); }catch(e){} }
+
+  function getSbClient(){
+    if(!sbConfig.url || !sbConfig.key) return null;
+    if(typeof window.supabase === "undefined") return null;
+    if(!sbClient || sbClient.__url !== sbConfig.url || sbClient.__key !== sbConfig.key){
+      sbClient = window.supabase.createClient(sbConfig.url, sbConfig.key);
+      sbClient.__url = sbConfig.url;
+      sbClient.__key = sbConfig.key;
+    }
+    return sbClient;
+  }
+
+  async function sbPush(silenzioso){
+    if(locked){ if(!silenzioso) showToast("Sblocca la configurazione per salvare su Supabase"); return; }
+    var client = getSbClient();
+    if(!client){ if(!silenzioso) showToast("Configura URL e chiave Supabase prima"); return; }
+    try{
+      var gamesRows = state.games.map(function(g, idx){
+        return { nome: g.nome, prezzo: g.prezzo, giacenza: g.giacenza, colore: g.color || null, immagine: g.immagine || null, ordine: idx };
+      });
+      var r1 = await client.from('gv_games').upsert(gamesRows, { onConflict: 'nome' });
+      if(r1.error) throw r1.error;
+
+      var r2 = await client.from('gv_operations').delete().neq('id', '__none__');
+      if(r2.error) throw r2.error;
+      var opsRows = state.operations.map(function(op){
+        return {
+          id: op.id, data: op.data, ora: op.ora || null, ts: op.ts || null, tipo: op.tipo, gioco: op.gioco || null,
+          quantita: op.quantita || 0, importo: op.importo || 0,
+          importo_vinto: (op.importoVinto != null ? op.importoVinto : null),
+          schede: op.schede || [], note: op.note || null
+        };
+      });
+      if(opsRows.length){
+        var r3 = await client.from('gv_operations').insert(opsRows);
+        if(r3.error) throw r3.error;
+      }
+
+      var settingsRows = [
+        { key: 'fondo_iniziale', value: String(state.fondoIniziale) },
+        { key: 'valore_magazzino_iniziale', value: String(state.valoreMagazzinoIniziale) }
+      ];
+      var r4 = await client.from('gv_settings').upsert(settingsRows, { onConflict: 'key' });
+      if(r4.error) throw r4.error;
+
+      var archivioRows = [];
+      Object.keys(archivio).forEach(function(d){
+        TURNI.forEach(function(t){
+          var a = archivio[d][t];
+          if(!a) return;
+          archivioRows.push({
+            data: d, turno: t, pezzi: a.pezzi, incasso_vendite: a.incassoVendite,
+            pagamenti: a.pagamenti, cassa_netta: a.cassaNettaGiorno, num_operazioni: a.numOperazioni
+          });
+        });
+      });
+      if(archivioRows.length){
+        var r5 = await client.from('gv_archivio').upsert(archivioRows, { onConflict: 'data,turno' });
+        if(r5.error) throw r5.error;
+      }
+
+      var tsEl = document.getElementById('sbLastSync');
+      if(tsEl) tsEl.textContent = "Ultimo salvataggio su Supabase: " + new Date().toLocaleString('it-IT');
+      if(!silenzioso) showToast("Dati salvati su Supabase");
+    } catch(e){
+      if(!silenzioso) showToast("Errore Supabase: " + (e.message || "connessione non riuscita"));
+      else console.warn("Sincronizzazione automatica Supabase non riuscita:", e);
+    }
+  }
+
+  var sbAutoSyncTimer = null;
+  function scheduleSbAutoSync(){
+    if(!sbConfig.url || !sbConfig.key) return; // auto-sync solo se Supabase e' configurato
+    clearTimeout(sbAutoSyncTimer);
+    sbAutoSyncTimer = setTimeout(function(){ sbPush(true); }, 3000);
+  }
+
+  async function sbPull(){
+    if(locked){ showToast("Sblocca la configurazione per caricare da Supabase"); return; }
+    var client = getSbClient();
+    if(!client){ showToast("Configura URL e chiave Supabase prima"); return; }
+    try{
+      var rGames = await client.from('gv_games').select('*').order('ordine');
+      if(rGames.error) throw rGames.error;
+      var rOps = await client.from('gv_operations').select('*');
+      if(rOps.error) throw rOps.error;
+      var rSettings = await client.from('gv_settings').select('*');
+      if(rSettings.error) throw rSettings.error;
+      var rArchivio = await client.from('gv_archivio').select('*');
+      if(rArchivio.error) throw rArchivio.error;
+
+      var games = rGames.data.map(function(g){
+        return { nome: g.nome, prezzo: Number(g.prezzo), giacenza: Number(g.giacenza), color: g.colore || "#2F6B4F", immagine: g.immagine || null };
+      });
+      var operations = rOps.data.map(function(op){
+        return {
+          id: op.id, data: op.data, ora: op.ora || null, ts: op.ts || null, tipo: op.tipo, gioco: op.gioco || "",
+          quantita: Number(op.quantita) || 0, importo: Number(op.importo) || 0,
+          importoVinto: op.importo_vinto != null ? Number(op.importo_vinto) : undefined,
+          schede: op.schede || [], note: op.note || ""
+        };
+      });
+      var settingsMap = {};
+      rSettings.data.forEach(function(s){ settingsMap[s.key] = s.value; });
+      var archivioObj = {};
+      rArchivio.data.forEach(function(a){
+        if(!archivioObj[a.data]) archivioObj[a.data] = {};
+        archivioObj[a.data][a.turno] = {
+          data: a.data, turno: a.turno, pezzi: a.pezzi, incassoVendite: Number(a.incasso_vendite),
+          pagamenti: Number(a.pagamenti), cassaNettaGiorno: Number(a.cassa_netta), numOperazioni: a.num_operazioni
+        };
+      });
+
+      await applyImportedBackup({
+        games: games, operations: operations,
+        fondoIniziale: settingsMap.fondo_iniziale != null ? Number(settingsMap.fondo_iniziale) : undefined,
+        valoreMagazzinoIniziale: settingsMap.valore_magazzino_iniziale != null ? Number(settingsMap.valore_magazzino_iniziale) : undefined,
+        archivioGiornaliero: archivioObj
+      });
+
+      document.getElementById('sbLastSync').textContent = "Ultimo caricamento da Supabase: " + new Date().toLocaleString('it-IT');
+      showToast("Dati caricati da Supabase");
+    } catch(e){
+      showToast("Errore Supabase: " + (e.message || "connessione non riuscita"));
+    }
+  }
+
   function exportExcel(){
     if(typeof XLSX === "undefined"){
       showToast("Libreria Excel non disponibile: serve una connessione internet");
@@ -433,9 +601,13 @@
       });
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(mgRows), "Magazzino");
 
-      var storicoRows = Object.keys(archivio).sort().map(function(d){
-        var r = archivio[d];
-        return { Giorno: r.data, Pezzi: r.pezzi, Incasso: r.incassoVendite, PagamentiVincite: r.pagamenti, CassaNetta: r.cassaNettaGiorno };
+      var storicoRows = [];
+      Object.keys(archivio).sort().forEach(function(d){
+        TURNI.forEach(function(t){
+          var r = archivio[d][t];
+          if(!r || r.numOperazioni === 0) return;
+          storicoRows.push({ Giorno: d, Turno: TURNO_LABEL[t], Pezzi: r.pezzi, Incasso: r.incassoVendite, PagamentiVincite: r.pagamenti, CassaNetta: r.cassaNettaGiorno });
+        });
       });
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(storicoRows), "Storico giornaliero");
 
@@ -526,24 +698,36 @@
   }
 
   function sortedOperations(){
-    return state.operations.slice().sort(function(a,b){ return (b.data + b.id) > (a.data + a.id) ? 1 : -1; });
+    return state.operations.slice().sort(function(a,b){ return (b.data + (b.ora||"") + b.id) > (a.data + (a.ora||"") + a.id) ? 1 : -1; });
   }
+
+  function fmtDateTime(op){
+    return fmtDate(op.data) + (op.ora ? " " + op.ora : "");
+  }
+
+  // Il registro a destra mostra solo le operazioni "vive": fatte di recente.
+  // Dopo questa finestra di tempo, un'operazione non scompare dai dati - esce
+  // solo dal registro in tempo reale, e resta visibile in "Tutte le operazioni".
+  var REGISTRO_FINESTRA_MS = 2 * 60 * 60 * 1000; // 2 ore
 
   function renderOpsList(){
     var opsList = document.getElementById('opsList');
     opsList.innerHTML = "";
-    var sorted = sortedOperations();
-    if(sorted.length === 0){
-      opsList.innerHTML = "<div class='empty-state'>Nessuna operazione registrata.</div>";
+    var ora = Date.now();
+    var recenti = sortedOperations().filter(function(op){
+      return op.ts && (ora - op.ts) <= REGISTRO_FINESTRA_MS;
+    });
+    if(recenti.length === 0){
+      opsList.innerHTML = "<div class='empty-state'>Nessuna operazione nelle ultime 2 ore.<br>Le operazioni più vecchie sono in \u201cTutte le operazioni\u201d qui sotto.</div>";
       return;
     }
-    sorted.slice(0, 50).forEach(function(op){
+    recenti.slice(0, 40).forEach(function(op){
       var info = operationDisplayInfo(op);
       var li = document.createElement('li');
       li.innerHTML =
         "<div class='op-left'><span class='op-tag " + info.tagClass + "'>" + info.tagLabel + "</span><span class='op-desc'>" + info.desc + "</span></div>" +
         "<div style='display:flex;align-items:center;gap:8px;'>" +
-          "<span class='op-date'>" + fmtDate(op.data) + "</span>" +
+          "<span class='op-date'>" + (op.ora || "") + "</span>" +
           "<span class='op-amount " + info.amountClass + "'>" + info.sign + fmtEUR(info.amountValue) + " €</span>" +
           "<button class='op-del' data-id='" + op.id + "' title='Elimina'>\u2715</button>" +
         "</div>";
@@ -564,7 +748,7 @@
       var info = operationDisplayInfo(op);
       var tr = document.createElement('tr');
       tr.innerHTML =
-        "<td>" + fmtDate(op.data) + "</td>" +
+        "<td>" + fmtDateTime(op) + "</td>" +
         "<td><span class='op-tag " + info.tagClass + "'>" + info.tagLabel + "</span></td>" +
         "<td>" + info.desc + "</td>" +
         "<td class='num-col' style='color:" + (info.amountClass === "pos" ? "var(--teal-dark)" : info.amountClass === "neg" ? "var(--red)" : "#8A6C0F") + ";font-weight:600;'>" + info.sign + fmtEUR(info.amountValue) + " €</td>" +
@@ -591,6 +775,7 @@
     await saveOperations();
     renderTiles();
     renderRiepilogo();
+    scheduleSbAutoSync();
     showToast("Operazione eliminata");
   }
 
@@ -733,6 +918,17 @@
         document.getElementById(id).disabled = locked;
       });
     }
+
+    var sbUrlInput = document.getElementById('sbUrl');
+    var sbKeyInput = document.getElementById('sbKey');
+    if(sbUrlInput){
+      if(document.activeElement !== sbUrlInput) sbUrlInput.value = sbConfig.url;
+      if(document.activeElement !== sbKeyInput) sbKeyInput.value = sbConfig.key;
+      [sbUrlInput, sbKeyInput].forEach(function(el){ el.disabled = locked; });
+      ["sbSaveConfigBtn","sbPushBtn","sbPullBtn"].forEach(function(id){
+        document.getElementById(id).disabled = locked;
+      });
+    }
   }
 
   document.getElementById('lockBtn').addEventListener('click', async function(){
@@ -765,9 +961,11 @@
   });
 
   document.getElementById('chiudiGiornataBtn').addEventListener('click', async function(){
-    var r = await chiudiGiornata(todayISO());
+    var oggi = todayISO();
+    await chiudiGiornata(oggi);
     renderRiepilogo();
-    showToast("Giornata del " + fmtDate(r.data) + " chiusa e salvata");
+    scheduleSbAutoSync();
+    showToast("Giornata del " + fmtDate(oggi) + " chiusa e salvata");
   });
 
   document.getElementById('exportBtn').addEventListener('click', exportBackup);
@@ -799,6 +997,17 @@
   });
   document.getElementById('ghPushBtn').addEventListener('click', ghPush);
   document.getElementById('ghPullBtn').addEventListener('click', ghPull);
+
+  document.getElementById('sbSaveConfigBtn').addEventListener('click', async function(){
+    if(locked) return;
+    sbConfig.url = document.getElementById('sbUrl').value.trim();
+    sbConfig.key = document.getElementById('sbKey').value.trim();
+    await saveSbConfig();
+    showToast("Impostazioni Supabase salvate");
+  });
+  document.getElementById('sbPushBtn').addEventListener('click', function(){ sbPush(false); });
+  document.getElementById('sbPullBtn').addEventListener('click', sbPull);
+
   document.getElementById('exportExcelBtn').addEventListener('click', exportExcel);
 
 
@@ -807,8 +1016,9 @@
     .then(function(){ return loadArchivio(); })
     .then(function(){ return loadLock(); })
     .then(function(){ return loadGhConfig(); })
+    .then(function(){ return loadSbConfig(); })
     .then(function(){ return checkMissedMidnight(); })
-    .then(function(){ scheduleMidnightClose(); renderAll(); })
+    .then(function(){ scheduleMidnightClose(); startRegistroRefreshTimer(); renderAll(); })
     .catch(function(){ renderAll(); });
 
 })();

@@ -594,6 +594,27 @@
         </div>
         <p id="ghLastSync" style="font-size:11.5px;color:var(--ink-soft);margin:0;"></p>
       </div>
+
+      <div class="panel" id="sbPanel">
+        <h2>Sincronizzazione con Supabase</h2>
+        <p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 12px;">
+          Salva i dati in un vero database in cloud (Supabase), così puoi usare il gestionale da più dispositivi e recuperare tutto se perdi questo. Serve un progetto Supabase gratuito con le tabelle create (vedi lo schema fornito a parte).
+        </p>
+        <div class="field">
+          <label for="sbUrl">URL progetto Supabase</label>
+          <input type="text" id="sbUrl" placeholder="https://xxxxxxxx.supabase.co">
+        </div>
+        <div class="field">
+          <label for="sbKey">Chiave anon pubblica</label>
+          <input type="password" id="sbKey" placeholder="eyJhbGciOi...">
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+          <button type="button" class="btn secondary" id="sbSaveConfigBtn">Salva impostazioni</button>
+          <button type="button" class="btn primary" id="sbPushBtn">Salva su Supabase adesso</button>
+          <button type="button" class="btn secondary" id="sbPullBtn">Carica da Supabase</button>
+        </div>
+        <p id="sbLastSync" style="font-size:11.5px;color:var(--ink-soft);margin:0;"></p>
+      </div>
     </section>
 
 
@@ -603,6 +624,7 @@
 <div class="toast" id="toast"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="app.js"></script>
 </body>
 </html>
